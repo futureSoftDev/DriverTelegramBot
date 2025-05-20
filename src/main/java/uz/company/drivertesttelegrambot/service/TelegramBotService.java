@@ -132,7 +132,7 @@ public class TelegramBotService extends TelegramLongPollingBot {
         if (session == null || sessionExpired(session.getAuthTime())) {
             askPhoneNumber(chatId);
         } else {
-            sendTextWithKeyboardRemove(chatId, TelegramMessageConstants.ASK_DRB);
+            sendTextWithKeyboardRemove(chatId);
             session.setSessionState(TelegramBotSessionState.WAITING_DRB);
         }
     }
@@ -240,8 +240,8 @@ public class TelegramBotService extends TelegramLongPollingBot {
         send(new SendMessage(chatId.toString(), text));
     }
 
-    private void sendTextWithKeyboardRemove(Long chatId, String text) {
-        SendMessage msg = new SendMessage(chatId.toString(), text);
+    private void sendTextWithKeyboardRemove(Long chatId) {
+        SendMessage msg = new SendMessage(chatId.toString(), TelegramMessageConstants.ASK_DRB);
         msg.setReplyMarkup(new ReplyKeyboardRemove(true));
         send(msg);
     }
