@@ -19,9 +19,5 @@ public class TelegramBotSessionDataDto {
 
     Instant authTime;
 
-    boolean waiting;
-
-    int authCheckCount;
-
     TelegramBotSessionState sessionState;
 }

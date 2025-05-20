@@ -7,26 +7,21 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
-import org.telegram.telegrambots.meta.api.objects.Contact;
-import org.telegram.telegrambots.meta.api.objects.Message;
-import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.*;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardRemove;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardButton;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
-import uz.company.drivertesttelegrambot.constants.MessageConstants;
+import uz.company.drivertesttelegrambot.constants.TelegramMessageConstants;
 import uz.company.drivertesttelegrambot.dto.TelegramBotSessionDataDto;
 import uz.company.drivertesttelegrambot.enums.TelegramBotSessionState;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Service
@@ -35,79 +30,100 @@ import java.util.concurrent.ConcurrentHashMap;
 public class TelegramBotService extends TelegramLongPollingBot {
 
     @Value("${application.telegram-bot-config.token}")
-    String botToken;
+    private String botToken;
 
     @Value("${application.telegram-bot-config.username}")
-    String botUsername;
+    private String botUsername;
 
     @Value("${application.telegram-bot-config.session_close_time_in_hours}")
-    int sessionCloseTimeInHours;
-
-    @Value("${application.telegram-bot-config.auth_check_limit_in_hour}")
-    int authCheckLimitInHours;
+    private int sessionCloseTimeInHours;
 
     private final Map<Long, TelegramBotSessionDataDto> sessionMap = new ConcurrentHashMap<>();
 
     @Override
     public void onUpdateReceived(Update update) {
-        Message message = update.getMessage();
+        Long chatId = getChatId(update);
+        if (chatId == null) return;
 
-        Long chatId = null;
-        if (message != null) {
-            chatId = update.getMessage().getChatId();
-        } else {
-            if (update.getCallbackQuery() != null && update.getCallbackQuery().getMessage() != null) {
-                chatId = update.getCallbackQuery().getMessage().getChatId();
-            }
-        }
-        if (message != null && message.hasText()) {
-            String messageText = message.getText();
-            if (MessageConstants.START_MESSAGE.equals(messageText)) {
-                if (!sessionMap.containsKey(chatId)) {
-                    askPhoneNumber(chatId);
-                    TelegramBotSessionDataDto dataDto = TelegramBotSessionDataDto.builder()
-                            .sessionState(TelegramBotSessionState.INITIAL)
-                            .build();
-                    sessionMap.put(chatId, dataDto);
-                } else {
-                    TelegramBotSessionDataDto dataDto = sessionMap.get(chatId);
-                    if (TelegramBotSessionState.INITIAL.equals(dataDto.getSessionState())) {
-                        askPhoneNumber(chatId);
-                    } else if (TelegramBotSessionState.CONTACT_SHARED.equals(dataDto.getSessionState())) {
-                        if (checkContactInWhiteList(dataDto.getPhoneNumber())) {
-                            showInlineMenuForCheckDRB(chatId);
-                            dataDto.setAuthTime(Instant.now());
-                        } else {
-                            handleContactNotAllowed(chatId, dataDto);
-                        }
-                    } else if (TelegramBotSessionState.CONTACT_NOT_ALLOWED.equals(dataDto.getSessionState())) {
-                        handleContactNotAllowed(chatId, dataDto);
-                    }
-                }
-            } else if (MessageConstants.CHECK_DRB.equals(messageText)) {
-                handleCheckDrb(chatId);
-            } else if (sessionMap.containsKey(chatId)) {
-                TelegramBotSessionDataDto dataDto = sessionMap.get(chatId);
-                if (TelegramBotSessionState.WAITING_DRB.equals(dataDto.getSessionState())) {
-                    if (checkContactInWhiteList(dataDto.getPhoneNumber())) {
-                        sendText(chatId, LocalDateTime.now().toString());
-                        dataDto.setSessionState(TelegramBotSessionState.CONTACT_SHARED);
-                    } else {
-                        showMenu(chatId, List.of("Recheck contact"));
-                    }
-                } else {
-                    showInlineMenuForCheckDRB(chatId);
-                }
+        if (update.hasMessage()) {
+            Message message = update.getMessage();
+            if (message.hasText()) {
+                handleTextMessage(chatId, message.getText());
+            } else if (message.hasContact()) {
+                handleContact(message.getContact(), chatId, update);
             } else {
                 askPhoneNumber(chatId);
             }
-        } else if (message != null && message.hasContact()) {
-            handleContact(message.getContact(), chatId);
         } else if (update.hasCallbackQuery()) {
-            String data = update.getCallbackQuery().getData();
-            if (MessageConstants.CHECK_DRB.equals(data)) {
-                handleCheckDrb(chatId);
+            handleCallback(update.getCallbackQuery(), chatId);
+        } else {
+            askPhoneNumber(chatId);
+        }
+    }
+
+    private void handleTextMessage(Long chatId, String text) {
+        TelegramBotSessionDataDto session = sessionMap.get(chatId);
+
+        switch (text) {
+            case TelegramMessageConstants.START_MESSAGE -> handleStart(chatId, session);
+            case TelegramMessageConstants.CHECK_DRB -> handleCheckDrb(chatId);
+            default -> handleDefaultText(chatId, session);
+        }
+    }
+
+    private void handleStart(Long chatId, TelegramBotSessionDataDto session) {
+        if (session == null) {
+            askPhoneNumber(chatId);
+            sessionMap.put(chatId, TelegramBotSessionDataDto.builder()
+                    .sessionState(TelegramBotSessionState.INITIAL)
+                    .build());
+            return;
+        }
+
+        switch (session.getSessionState()) {
+            case INITIAL -> askPhoneNumber(chatId);
+            case AUTHORIZED -> {
+                if (checkContactInWhiteList(session.getPhoneNumber())) {
+                    showInlineMenuForCheckDRB(chatId);
+                    session.setAuthTime(Instant.now());
+                } else {
+                    handleContactNotAllowed(chatId, session);
+                }
             }
+            case UN_AUTHORIZED -> handleContactNotAllowed(chatId, session);
+        }
+    }
+
+    private void handleDefaultText(Long chatId, TelegramBotSessionDataDto session) {
+        if (session == null) {
+            askPhoneNumber(chatId);
+            return;
+        }
+
+        switch (session.getSessionState()) {
+            case WAITING_DRB -> {
+                if (checkContactInWhiteList(session.getPhoneNumber())) {
+                    session.setAuthTime(Instant.now());
+                    sendText(chatId, getDrbInfo());
+                    handleCheckDrb(chatId);
+                } else {
+                    handleContactNotAllowed(chatId, session);
+                }
+            }
+            case UN_AUTHORIZED -> {
+                if (checkContactInWhiteList(session.getPhoneNumber())) {
+                    showInlineMenuForCheckDRB(chatId);
+                } else {
+                    handleContactNotAllowed(chatId, session);
+                }
+            }
+        }
+    }
+
+    private void handleCallback(CallbackQuery callbackQuery, Long chatId) {
+        String data = callbackQuery.getData();
+        if (TelegramMessageConstants.CHECK_DRB.equals(data)) {
+            handleCheckDrb(chatId);
         }
     }
 
@@ -116,75 +132,78 @@ public class TelegramBotService extends TelegramLongPollingBot {
         if (session == null || sessionExpired(session.getAuthTime())) {
             askPhoneNumber(chatId);
         } else {
-            sendTextWithKeyboardRemove(chatId, " Iltimos avtomobil raqamini kiriting \uD83D\uDE97");
+            sendTextWithKeyboardRemove(chatId, TelegramMessageConstants.ASK_DRB);
             session.setSessionState(TelegramBotSessionState.WAITING_DRB);
         }
+    }
+
+    private void handleContact(Contact contact, Long chatId, Update update) {
+        if (!Objects.equals(contact.getUserId(), update.getMessage().getFrom().getId())) {
+            sendText(chatId, TelegramMessageConstants.SHARE_OWN_CONTACT_WARNING_MESSAGE);
+            askPhoneNumber(chatId);
+            return;
+        }
+
+        String phoneNumber = contact.getPhoneNumber();
+        boolean isInWhiteList = checkContactInWhiteList(phoneNumber);
+
+        TelegramBotSessionDataDto session = sessionMap.getOrDefault(chatId, TelegramBotSessionDataDto.builder().build());
+        session.setPhoneNumber(phoneNumber);
+
+        if (isInWhiteList) {
+            session.setSessionState(TelegramBotSessionState.AUTHORIZED);
+            session.setAuthTime(Instant.now());
+            showInlineMenuForCheckDRB(chatId);
+        } else {
+            handleContactNotAllowed(chatId, session);
+        }
+
+        sessionMap.put(chatId, session);
     }
 
     private void askPhoneNumber(Long chatId) {
         SendMessage msg = new SendMessage();
         msg.setChatId(chatId);
-        msg.setText(" \uD83D\uDCDE Please share your phone number to continue");
+        msg.setText(TelegramMessageConstants.SHARE_CONTACT_HEADER_MESSAGE);
 
-        KeyboardButton contactButton = new KeyboardButton("Kontaktni ulashish");
+        KeyboardButton contactButton = new KeyboardButton(TelegramMessageConstants.SHARE_CONTACT_MESSAGE);
         contactButton.setRequestContact(true);
 
-        KeyboardRow row = new KeyboardRow();
-        row.add(contactButton);
-
-        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
-        keyboard.setKeyboard(List.of(row));
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup(List.of(new KeyboardRow(List.of(contactButton))));
         keyboard.setResizeKeyboard(true);
         keyboard.setOneTimeKeyboard(true);
+
         msg.setReplyMarkup(keyboard);
         send(msg);
     }
 
+    private void showInlineMenuForCheckDRB(Long chatId) {
+        Map<String, String> options = Map.of(
+                TelegramMessageConstants.CHECK_DRB, TelegramMessageConstants.CHECK_DRB_TEXt
+        );
+        showInlineMenu(chatId, options);
+    }
+
     private void showInlineMenu(Long chatId, Map<String, String> options) {
-        SendMessage msg = new SendMessage();
-        msg.setChatId(chatId);
-        msg.setText(" \uD83D\uDD3D Tanlang");
-        List<InlineKeyboardButton> rows = new ArrayList<>();
-        options.forEach((callBackData, text) -> {
-            InlineKeyboardButton inlineKeyboardButton = new InlineKeyboardButton();
-            inlineKeyboardButton.setText(text);
-            inlineKeyboardButton.setCallbackData(callBackData);
-            rows.add(inlineKeyboardButton);
-        });
-        List<List<InlineKeyboardButton>> keyboard = List.of(rows);
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-        markup.setKeyboard(keyboard);
+        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+        for (Map.Entry<String, String> entry : options.entrySet()) {
+            InlineKeyboardButton button = new InlineKeyboardButton(entry.getValue());
+            button.setCallbackData(entry.getKey());
+            keyboard.add(List.of(button));
+        }
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup(keyboard);
+        SendMessage msg = new SendMessage(chatId.toString(), TelegramMessageConstants.SELECT_OPTION);
         msg.setReplyMarkup(markup);
         send(msg);
     }
 
-    private void showInlineMenuForCheckDRB(Long chatId) {
-        Map<String, String> options = new HashMap<>();
-        options.put(MessageConstants.CHECK_DRB, "Davlat raqam belgisini tekshirish");
-        this.showInlineMenu(chatId, options);
-    }
-
-
-    private void handleContact(Contact contact, Long chatId) {
-        String phoneNumber = contact.getPhoneNumber();
-        TelegramBotSessionDataDto sessionDataDto = sessionMap.getOrDefault(chatId, TelegramBotSessionDataDto.builder().build());
-        sessionDataDto.setPhoneNumber(phoneNumber);
-        if (checkContactInWhiteList(phoneNumber)) {
-            showInlineMenuForCheckDRB(chatId);
-            sessionDataDto.setSessionState(TelegramBotSessionState.CONTACT_SHARED);
-            sessionDataDto.setAuthTime(Instant.now());
-        } else {
-            sendText(chatId, "You are not allowed to use this bot.");
-            sessionDataDto.setSessionState(TelegramBotSessionState.CONTACT_NOT_ALLOWED);
-            sessionDataDto.setAuthCheckCount(sessionDataDto.getAuthCheckCount() + 1);
-        }
-        sessionMap.put(chatId, sessionDataDto);
+    private void handleContactNotAllowed(Long chatId, TelegramBotSessionDataDto session) {
+        showMenu(chatId, List.of(TelegramMessageConstants.CONTACT_STATE_RECHECK));
+        session.setSessionState(TelegramBotSessionState.UN_AUTHORIZED);
     }
 
     private void showMenu(Long chatId, List<String> options) {
-        SendMessage msg = new SendMessage();
-        msg.setChatId(chatId);
-        msg.setText("Choose an option:");
         List<KeyboardRow> rows = new ArrayList<>();
         for (String option : options) {
             KeyboardRow row = new KeyboardRow();
@@ -192,63 +211,54 @@ public class TelegramBotService extends TelegramLongPollingBot {
             rows.add(row);
         }
 
-
-        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
-        keyboard.setKeyboard(rows);
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup(rows);
         keyboard.setResizeKeyboard(true);
         keyboard.setOneTimeKeyboard(true);
 
+        SendMessage msg = new SendMessage(chatId.toString(), TelegramMessageConstants.USER_NOT_ALLOWED_TO_USE_THIS_BOT);
         msg.setReplyMarkup(keyboard);
         send(msg);
+    }
+
+    private boolean sessionExpired(Instant lastChecked) {
+        return lastChecked == null || Duration.between(lastChecked, Instant.now()).toHours() >= sessionCloseTimeInHours;
+    }
+
+    private boolean checkContactInWhiteList(String phoneNumber) {
+        return StringUtils.hasText(phoneNumber) && phoneNumber.equals("+998909014458");
     }
 
     private void send(SendMessage message) {
         try {
             execute(message);
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Telegram send error: {}", e.getMessage(), e);
         }
     }
 
     private void sendText(Long chatId, String text) {
-        SendMessage msg = new SendMessage(chatId.toString(), text);
-        send(msg);
+        send(new SendMessage(chatId.toString(), text));
     }
 
     private void sendTextWithKeyboardRemove(Long chatId, String text) {
-        SendMessage msg = new SendMessage();
-        msg.setChatId(chatId);
-        msg.setText(text);
+        SendMessage msg = new SendMessage(chatId.toString(), text);
         msg.setReplyMarkup(new ReplyKeyboardRemove(true));
         send(msg);
     }
 
-    private boolean sessionExpired(Instant lastChecked) {
-        return Duration.between(lastChecked == null ? Instant.now().plusMillis(1) : lastChecked, Instant.now()).toHours() >= sessionCloseTimeInHours;
-    }
-
-    private boolean checkContactInWhiteList(String phoneNumber) {
-        if (StringUtils.hasText(phoneNumber)) {
-            return phoneNumber.equals("+998909014459");
+    private Long getChatId(Update update) {
+        if (update.hasMessage()) {
+            return update.getMessage().getChatId();
+        } else if (update.hasCallbackQuery()) {
+            return Optional.ofNullable(update.getCallbackQuery().getMessage())
+                    .map(MaybeInaccessibleMessage::getChatId)
+                    .orElse(null);
         }
-        return false;
+        return null;
     }
 
-    private void handleContactNotAllowed(Long chatId, TelegramBotSessionDataDto sessionDataDto) {
-        if (!checkContactInWhiteList(sessionDataDto.getPhoneNumber())) {
-            if (authCheckLimitInHours < sessionDataDto.getAuthCheckCount()) {
-                sendText(chatId, "You are not allowed to use this bot. Check after 1 hour");
-            } else {
-                showMenu(chatId, List.of("Recheck contact"));
-                sessionDataDto.setAuthCheckCount(sessionDataDto.getAuthCheckCount() + 1);
-            }
-        } else {
-            showInlineMenuForCheckDRB(chatId);
-        }
-    }
-
-    private void validateDrb() {
-        //TODO regex pattern
+    private String getDrbInfo() {
+        return LocalDateTime.now().toString();
     }
 
     @Override
@@ -258,6 +268,6 @@ public class TelegramBotService extends TelegramLongPollingBot {
 
     @Override
     public String getBotToken() {
-        return this.botToken;
+        return botToken;
     }
 }
